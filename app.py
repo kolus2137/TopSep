@@ -1,10 +1,14 @@
 import asyncio
 from datetime import datetime
+import base64
+import io
 import os
+import time
 import threading
 import customtkinter as ctk
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from tkinter import filedialog
 from PIL import Image
 import websockets
 
@@ -17,16 +21,12 @@ class ModernTopSep(ctk.CTk):
         super().__init__()
 
         self.title("Topsep — Twój prywatny komunikator")
-        self.geometry("850x620")
-        self.configure(fg_color="#0F172A")  # Głębokie, eleganckie tło Slate
+        self.geometry("880x650")
+        self.configure(fg_color="#0F172A")
 
-        # Ustawienie ikony okna, jeśli plik istnieje w folderze
+        # Ustawienie ikony okna
         if os.path.exists("icon.ico"):
             self.iconbitmap("icon.ico")
-        elif os.path.exists("icon.png"):
-            img = Image.open("icon.png")
-            # Domyślny sposób wspierany przez CustomTkinter / Tkinter dla png
-            photo = ctk.CTkImage(light_image=img, dark_image=img, size=(32, 32))
 
         # Generowanie kluczy RSA-2048
         self.private_key = rsa.generate_private_key(
@@ -35,6 +35,10 @@ class ModernTopSep(ctk.CTk):
         self.public_key = self.private_key.public_key()
         self.peer_public_key = None
         self.ws_connection = None
+
+        # Antyspam
+        self.last_msg_time = 0
+        self.SPAM_COOLDOWN = 1.0  # Wyciszenie spamu: max 1 wiadomość na sekundę
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=1)
@@ -57,7 +61,6 @@ class ModernTopSep(ctk.CTk):
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.grid_rowconfigure(6, weight=1)
 
-        # Nagłówek / Logo
         self.logo_label = ctk.CTkLabel(
             self.sidebar,
             text="Topsep",
@@ -76,7 +79,6 @@ class ModernTopSep(ctk.CTk):
             row=1, column=0, padx=20, pady=(0, 25), sticky="w"
         )
 
-        # Adres serwera
         self.ip_label = ctk.CTkLabel(
             self.sidebar,
             text="SERWER / DOMENA",
@@ -99,7 +101,6 @@ class ModernTopSep(ctk.CTk):
         self.ip_entry.insert(0, "topsep.onrender.com")
         self.ip_entry.grid(row=3, column=0, padx=20, pady=(0, 15), sticky="ew")
 
-        # Przycisk połącz
         self.conn_btn = ctk.CTkButton(
             self.sidebar,
             text="Połącz z siecią",
@@ -113,7 +114,6 @@ class ModernTopSep(ctk.CTk):
         )
         self.conn_btn.grid(row=4, column=0, padx=20, pady=5, sticky="ew")
 
-        # Pasek statusu
         self.status_frame = ctk.CTkFrame(
             self.sidebar, fg_color="#0F172A", corner_radius=12
         )
@@ -137,7 +137,6 @@ class ModernTopSep(ctk.CTk):
         self.main_frame.grid_rowconfigure(0, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
 
-        # Obszar wiadomości (Scrollable Frame dla bąbelków)
         self.messages_scroll = ctk.CTkScrollableFrame(
             self.main_frame, fg_color="transparent"
         )
@@ -146,14 +145,29 @@ class ModernTopSep(ctk.CTk):
         )
         self.messages_scroll.grid_columnconfigure(0, weight=1)
 
-        # Pasek wpisywania wiadomości
+        # Dolny panel sterowania (Wpisz + Obrazek + Wyślij)
         self.input_frame = ctk.CTkFrame(
             self.main_frame, fg_color="transparent"
         )
         self.input_frame.grid(
             row=1, column=0, padx=20, pady=(0, 20), sticky="ew"
         )
-        self.input_frame.grid_columnconfigure(0, weight=1)
+        self.input_frame.grid_columnconfigure(1, weight=1)
+
+        # Przycisk załącznika / zdjęcia
+        self.file_btn = ctk.CTkButton(
+            self.input_frame,
+            text="📎",
+            command=self.send_image,
+            fg_color="#1E293B",
+            hover_color="#334155",
+            text_color="#F8FAFC",
+            font=ctk.CTkFont(size=16),
+            width=44,
+            height=44,
+            corner_radius=22,
+        )
+        self.file_btn.grid(row=0, column=0, padx=(0, 8))
 
         self.cmd_entry = ctk.CTkEntry(
             self.input_frame,
@@ -166,22 +180,22 @@ class ModernTopSep(ctk.CTk):
             height=44,
             corner_radius=22,
         )
-        self.cmd_entry.grid(row=0, column=0, padx=(0, 10), sticky="ew")
-        self.cmd_entry.bind("<Return>", lambda e: self.send_message())
+        self.cmd_entry.grid(row=0, column=1, padx=(0, 8), sticky="ew")
+        self.cmd_entry.bind("<Return>", lambda e: self.send_text_message())
 
         self.send_btn = ctk.CTkButton(
             self.input_frame,
             text="Wyślij",
-            command=self.send_message,
+            command=self.send_text_message,
             fg_color="#3B82F6",
             hover_color="#2563EB",
             text_color="#FFFFFF",
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            width=90,
+            width=80,
             height=44,
             corner_radius=22,
         )
-        self.send_btn.grid(row=0, column=1)
+        self.send_btn.grid(row=0, column=2)
 
         self.add_system_message("Wprowadź adres i kliknij 'Połącz z siecią'.")
 
@@ -194,61 +208,63 @@ class ModernTopSep(ctk.CTk):
         )
         lbl.pack(pady=6)
 
-    def add_message_bubble(self, message, is_me=False):
+    def add_message_bubble(self, content, is_me=False, is_image=False):
         now = datetime.now().strftime("%H:%M")
 
-        # Kontener na całą linię bąbelka
         bubble_row = ctk.CTkFrame(self.messages_scroll, fg_color="transparent")
         bubble_row.pack(fill="x", pady=4, padx=5)
 
-        if is_me:
-            # Prawy bąbelek (Niebeski - Ty)
-            bubble = ctk.CTkFrame(
-                bubble_row, fg_color="#2563EB", corner_radius=16
-            )
-            bubble.pack(side="right", anchor="e", ipadx=6, ipady=2)
+        bg_color = "#2563EB" if is_me else "#334155"
+        side = "right" if is_me else "left"
+        anchor = "e" if is_me else "w"
 
-            msg_lbl = ctk.CTkLabel(
-                bubble,
-                text=message,
-                text_color="#FFFFFF",
-                font=ctk.CTkFont(family="Segoe UI", size=13),
-                wraplength=400,
-                justify="left",
-            )
-            msg_lbl.pack(anchor="w", padx=12, pady=(6, 0))
+        bubble = ctk.CTkFrame(
+            bubble_row, fg_color=bg_color, corner_radius=16
+        )
+        bubble.pack(side=side, anchor=anchor, ipadx=6, ipady=2)
 
-            time_lbl = ctk.CTkLabel(
-                bubble,
-                text=now,
-                text_color="#93C5FD",
-                font=ctk.CTkFont(family="Segoe UI", size=8),
-            )
-            time_lbl.pack(anchor="e", padx=10, pady=(0, 4))
+        if is_image:
+            # Renderowanie przesłanego podglądu zdjęcia
+            try:
+                img_data = base64.b64decode(content)
+                pil_img = Image.open(io.BytesIO(img_data))
+                
+                # Reskalowanie podglądu do max 250px
+                pil_img.thumbnail((250, 250))
+                ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=pil_img.size)
+
+                img_lbl = ctk.CTkLabel(bubble, image=ctk_img, text="")
+                img_lbl.pack(anchor="w", padx=8, pady=(8, 0))
+            except Exception as e:
+                msg_lbl = ctk.CTkLabel(bubble, text="[Błąd ładowania obrazu]", text_color="#FF8888")
+                msg_lbl.pack(anchor="w", padx=12, pady=(6, 0))
         else:
-            # Lewy bąbelek (Szary - Rozmówca)
-            bubble = ctk.CTkFrame(
-                bubble_row, fg_color="#334155", corner_radius=16
-            )
-            bubble.pack(side="left", anchor="w", ipadx=6, ipady=2)
-
             msg_lbl = ctk.CTkLabel(
                 bubble,
-                text=message,
-                text_color="#F8FAFC",
+                text=content,
+                text_color="#FFFFFF" if is_me else "#F8FAFC",
                 font=ctk.CTkFont(family="Segoe UI", size=13),
                 wraplength=400,
                 justify="left",
             )
             msg_lbl.pack(anchor="w", padx=12, pady=(6, 0))
 
-            time_lbl = ctk.CTkLabel(
-                bubble,
-                text=now,
-                text_color="#94A3B8",
-                font=ctk.CTkFont(family="Segoe UI", size=8),
-            )
-            time_lbl.pack(anchor="e", padx=10, pady=(0, 4))
+        time_color = "#93C5FD" if is_me else "#94A3B8"
+        time_lbl = ctk.CTkLabel(
+            bubble,
+            text=now,
+            text_color=time_color,
+            font=ctk.CTkFont(family="Segoe UI", size=8),
+        )
+        time_lbl.pack(anchor="e", padx=10, pady=(0, 4))
+
+    def is_spam(self):
+        current_time = time.time()
+        if current_time - self.last_msg_time < self.SPAM_COOLDOWN:
+            self.add_system_message("Wysyłasz wiadomości zbyt szybko! Zwolnij.")
+            return True
+        self.last_msg_time = current_time
+        return False
 
     def start_connection(self):
         self.status_lbl.configure(
@@ -271,9 +287,8 @@ class ModernTopSep(ctk.CTk):
 
     async def connect_ws(self, url):
         try:
-            self.ws_connection = await websockets.connect(url)
+            self.ws_connection = await websockets.connect(url, max_size=10_000_000) # Większy limit pakietu na fotki
 
-            # Wysyłamy klucz publiczny w czystym formacie tekstu PEM
             pub_pem = self.public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo,
@@ -289,32 +304,22 @@ class ModernTopSep(ctk.CTk):
             async for raw_msg in self.ws_connection:
                 if raw_msg.startswith("KEY:"):
                     pem_data = raw_msg[4:].encode("utf-8")
-
-                    # Naprawa spamu: odsyłamy klucz tylko raz, gdy jeszcze go nie mamy!
                     if self.peer_public_key is None:
                         self.peer_public_key = (
                             serialization.load_pem_public_key(pem_data)
                         )
-                        self.add_system_message(
-                            "Wymieniono klucze szyfrujące. Połączenie jest bezpieczne."
-                        )
+                        self.add_system_message("Wymieniono klucze. Połączenie bezpieczne.")
                         await self.ws_connection.send("KEY:" + pub_pem)
 
                 elif raw_msg.startswith("MSG:"):
-                    hex_data = raw_msg[4:]
-                    encrypted_bytes = bytes.fromhex(hex_data)
+                    decrypted = self._decrypt_raw(raw_msg[4:])
+                    if decrypted:
+                        self.add_message_bubble(decrypted, is_me=False, is_image=False)
 
-                    decrypted = self.private_key.decrypt(
-                        encrypted_bytes,
-                        padding.OAEP(
-                            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                            algorithm=hashes.SHA256(),
-                            label=None,
-                        ),
-                    )
-                    self.add_message_bubble(
-                        decrypted.decode("utf-8"), is_me=False
-                    )
+                elif raw_msg.startswith("IMG:"):
+                    decrypted = self._decrypt_raw(raw_msg[4:])
+                    if decrypted:
+                        self.add_message_bubble(decrypted, is_me=False, is_image=True)
 
         except Exception as e:
             self.status_lbl.configure(
@@ -322,34 +327,91 @@ class ModernTopSep(ctk.CTk):
             )
             self.add_system_message(f"Błąd połączenia: {e}")
 
-    def send_message(self):
-        text = self.cmd_entry.get().strip()
-        if not text:
-            return
-
-        if self.peer_public_key is None:
-            self.add_system_message("Oczekiwanie na połączenie drugiego użytkownika...")
-            return
-
-        try:
-            encrypted_bytes = self.peer_public_key.encrypt(
-                text.encode("utf-8"),
+    def _encrypt_bytes(self, data_bytes):
+        # Dzielimy dane na bloki przy wielkich plikach / RSA OAEP max block limit
+        chunk_size = 190
+        encrypted_chunks = []
+        for i in range(0, len(data_bytes), chunk_size):
+            chunk = data_bytes[i:i + chunk_size]
+            encrypted_chunk = self.peer_public_key.encrypt(
+                chunk,
                 padding.OAEP(
                     mgf=padding.MGF1(algorithm=hashes.SHA256()),
                     algorithm=hashes.SHA256(),
                     label=None,
                 ),
             )
+            encrypted_chunks.append(encrypted_chunk.hex())
+        return "|".join(encrypted_chunks)
 
-            hex_msg = "MSG:" + encrypted_bytes.hex()
+    def _decrypt_raw(self, raw_hex_data):
+        try:
+            chunks = raw_hex_data.split("|")
+            decrypted_bytes = bytearray()
+            for chunk_hex in chunks:
+                chunk_bytes = bytes.fromhex(chunk_hex)
+                decrypted_chunk = self.private_key.decrypt(
+                    chunk_bytes,
+                    padding.OAEP(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        algorithm=hashes.SHA256(),
+                        label=None,
+                    ),
+                )
+                decrypted_bytes.extend(decrypted_chunk)
+            return decrypted_bytes.decode("utf-8")
+        except Exception as e:
+            return None
 
+    def send_text_message(self):
+        text = self.cmd_entry.get().strip()
+        if not text:
+            return
+
+        if self.peer_public_key is None:
+            self.add_system_message("Oczekiwanie na drugiego użytkownika...")
+            return
+
+        if self.is_spam():
+            return
+
+        try:
+            hex_payload = self._encrypt_bytes(text.encode("utf-8"))
             asyncio.run_coroutine_threadsafe(
-                self.ws_connection.send(hex_msg), self.loop
+                self.ws_connection.send("MSG:" + hex_payload), self.loop
             )
-            self.add_message_bubble(text, is_me=True)
+            self.add_message_bubble(text, is_me=True, is_image=False)
             self.cmd_entry.delete(0, "end")
         except Exception as e:
             self.add_system_message(f"Błąd wysyłania: {e}")
+
+    def send_image(self):
+        if self.peer_public_key is None:
+            self.add_system_message("Oczekiwanie na drugiego użytkownika...")
+            return
+
+        if self.is_spam():
+            return
+
+        file_path = filedialog.askopenfilename(
+            filetypes=[("Pliki obrazów", "*.png;*.jpg;*.jpeg;*.gif;*.bmp")]
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "rb") as f:
+                img_bytes = f.read()
+
+            b64_img = base64.b64encode(img_bytes).decode("utf-8")
+            hex_payload = self._encrypt_bytes(b64_img.encode("utf-8"))
+
+            asyncio.run_coroutine_threadsafe(
+                self.ws_connection.send("IMG:" + hex_payload), self.loop
+            )
+            self.add_message_bubble(b64_img, is_me=True, is_image=True)
+        except Exception as e:
+            self.add_system_message(f"Błąd wysyłania zdjęcia: {e}")
 
 
 if __name__ == "__main__":
