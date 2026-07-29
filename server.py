@@ -1,50 +1,36 @@
-import socket
-import threading
+import asyncio
+import os
+import websockets
 
-HOST = "0.0.0.0"
-PORT = 5555
-
-clients = []
+CLIENTS = set()
 
 
-def handle_client(conn, addr):
-    print(f"[+] RELAY_NODE CONNECTED: {addr[0]}:{addr[1]}")
-    clients.append(conn)
-
-    while True:
-        try:
-            data = conn.recv(4096)
-            if not data:
-                break
-            for client in clients:
-                if client != conn:
+async def handler(websocket):
+    print(f"[+] CLIENT CONNECTED: {websocket.remote_address}")
+    CLIENTS.add(websocket)
+    try:
+        async for message in websocket:
+            # Przekazuj wiadomość do wszystkich pozostałych połączonych klientów
+            for client in CLIENTS:
+                if client != websocket:
                     try:
-                        client.send(data)
-                    except:
-                        if client in clients:
-                            clients.remove(client)
-        except:
-            break
-
-    print(f"[-] RELAY_NODE DISCONNECTED: {addr[0]}:{addr[1]}")
-    if conn in clients:
-        clients.remove(conn)
-    conn.close()
+                        await client.send(message)
+                    except Exception as e:
+                        print(f"[-] SEND ERROR: {e}")
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    finally:
+        print(f"[-] CLIENT DISCONNECTED: {websocket.remote_address}")
+        CLIENTS.remove(websocket)
 
 
-def main():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((HOST, PORT))
-    server.listen()
-    print(f"[ TOPSEP CORE SERVER // LISTENING ON PORT {PORT} ]")
-
-    while True:
-        conn, addr = server.accept()
-        threading.Thread(
-            target=handle_client, args=(conn, addr), daemon=True
-        ).start()
+async def main():
+    # Render automatycznie przekazuje port w zmiennej środowiskowej PORT
+    port = int(os.environ.get("PORT", 10000))
+    print(f"[ TOPSEP CORE SERVER // LISTENING ON PORT {port} ]")
+    async with websockets.serve(handler, "0.0.0.0", port):
+        await asyncio.Future()  # Działa 24/7
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
