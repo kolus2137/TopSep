@@ -2,17 +2,20 @@ import asyncio
 from datetime import datetime
 import base64
 import io
+import json
 import os
 import time
 import threading
 import customtkinter as ctk
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
-from tkinter import filedialog
+from tkinter import filedialog, simpledialog
 from PIL import Image
 import websockets
 
 ctk.set_appearance_mode("dark")
+
+HISTORY_FILE = "chat_history.json"
 
 
 class ModernTopSep(ctk.CTk):
@@ -21,12 +24,16 @@ class ModernTopSep(ctk.CTk):
         super().__init__()
 
         self.title("Topsep — Twój prywatny komunikator")
-        self.geometry("880x650")
+        self.geometry("900x680")
         self.configure(fg_color="#0F172A")
 
-        # Ustawienie ikony okna
+        # Ikona
         if os.path.exists("icon.ico"):
             self.iconbitmap("icon.ico")
+
+        # Domyślny nick / Wczytanie z historii
+        self.my_nickname = "Anonim"
+        self.load_stored_nickname()
 
         # Generowanie kluczy RSA-2048
         self.private_key = rsa.generate_private_key(
@@ -34,17 +41,21 @@ class ModernTopSep(ctk.CTk):
         )
         self.public_key = self.private_key.public_key()
         self.peer_public_key = None
+        self.peer_nickname = "Rozmówca"
         self.ws_connection = None
 
         # Antyspam
         self.last_msg_time = 0
-        self.SPAM_COOLDOWN = 1.0  # Wyciszenie spamu: max 1 wiadomość na sekundę
+        self.SPAM_COOLDOWN = 1.0
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=1)
 
         self.setup_sidebar()
         self.setup_chat_area()
+
+        # Wczytanie historii czatu do widoku
+        self.load_chat_history()
 
         # Pętla asynchroniczna w tle
         self.loop = asyncio.new_event_loop()
@@ -54,12 +65,21 @@ class ModernTopSep(ctk.CTk):
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
+    def load_stored_nickname(self):
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.my_nickname = data.get("my_nickname", "Anonim")
+            except Exception:
+                pass
+
     def setup_sidebar(self):
         self.sidebar = ctk.CTkFrame(
             self, width=240, corner_radius=0, fg_color="#1E293B"
         )
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(6, weight=1)
+        self.sidebar.grid_rowconfigure(8, weight=1)
 
         self.logo_label = ctk.CTkLabel(
             self.sidebar,
@@ -67,7 +87,7 @@ class ModernTopSep(ctk.CTk):
             font=ctk.CTkFont(family="Segoe UI", size=26, weight="bold"),
             text_color="#38BDF8",
         )
-        self.logo_label.grid(row=0, column=0, padx=20, pady=(25, 2), sticky="w")
+        self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 2), sticky="w")
 
         self.sub_logo = ctk.CTkLabel(
             self.sidebar,
@@ -75,17 +95,38 @@ class ModernTopSep(ctk.CTk):
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color="#94A3B8",
         )
-        self.sub_logo.grid(
-            row=1, column=0, padx=20, pady=(0, 25), sticky="w"
-        )
+        self.sub_logo.grid(row=1, column=0, padx=20, pady=(0, 15), sticky="w")
 
+        # Sekcja Nicku
+        self.nick_label = ctk.CTkLabel(
+            self.sidebar,
+            text="TWÓJ NICK",
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            text_color="#64748B",
+        )
+        self.nick_label.grid(row=2, column=0, padx=20, pady=(5, 2), sticky="w")
+
+        self.nick_entry = ctk.CTkEntry(
+            self.sidebar,
+            fg_color="#0F172A",
+            border_color="#334155",
+            border_width=1,
+            text_color="#F8FAFC",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            height=34,
+            corner_radius=8,
+        )
+        self.nick_entry.insert(0, self.my_nickname)
+        self.nick_entry.grid(row=3, column=0, padx=20, pady=(0, 15), sticky="ew")
+
+        # Serwer
         self.ip_label = ctk.CTkLabel(
             self.sidebar,
             text="SERWER / DOMENA",
             font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
             text_color="#64748B",
         )
-        self.ip_label.grid(row=2, column=0, padx=20, pady=(5, 2), sticky="w")
+        self.ip_label.grid(row=4, column=0, padx=20, pady=(5, 2), sticky="w")
 
         self.ip_entry = ctk.CTkEntry(
             self.sidebar,
@@ -95,11 +136,11 @@ class ModernTopSep(ctk.CTk):
             border_width=1,
             text_color="#F8FAFC",
             font=ctk.CTkFont(family="Segoe UI", size=12),
-            height=36,
-            corner_radius=10,
+            height=34,
+            corner_radius=8,
         )
         self.ip_entry.insert(0, "topsep.onrender.com")
-        self.ip_entry.grid(row=3, column=0, padx=20, pady=(0, 15), sticky="ew")
+        self.ip_entry.grid(row=5, column=0, padx=20, pady=(0, 15), sticky="ew")
 
         self.conn_btn = ctk.CTkButton(
             self.sidebar,
@@ -112,13 +153,27 @@ class ModernTopSep(ctk.CTk):
             height=38,
             corner_radius=10,
         )
-        self.conn_btn.grid(row=4, column=0, padx=20, pady=5, sticky="ew")
+        self.conn_btn.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
+
+        # Czyszczenie historii
+        self.clear_btn = ctk.CTkButton(
+            self.sidebar,
+            text="Wyczysć historię",
+            command=self.clear_chat_history,
+            fg_color="#334155",
+            hover_color="#475569",
+            text_color="#94A3B8",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            height=28,
+            corner_radius=8,
+        )
+        self.clear_btn.grid(row=7, column=0, padx=20, pady=(10, 0), sticky="ew")
 
         self.status_frame = ctk.CTkFrame(
             self.sidebar, fg_color="#0F172A", corner_radius=12
         )
         self.status_frame.grid(
-            row=5, column=0, padx=20, pady=(20, 0), sticky="ew"
+            row=8, column=0, padx=20, pady=(20, 20), sticky="sew"
         )
 
         self.status_lbl = ctk.CTkLabel(
@@ -145,7 +200,6 @@ class ModernTopSep(ctk.CTk):
         )
         self.messages_scroll.grid_columnconfigure(0, weight=1)
 
-        # Dolny panel sterowania (Wpisz + Obrazek + Wyślij)
         self.input_frame = ctk.CTkFrame(
             self.main_frame, fg_color="transparent"
         )
@@ -154,7 +208,6 @@ class ModernTopSep(ctk.CTk):
         )
         self.input_frame.grid_columnconfigure(1, weight=1)
 
-        # Przycisk załącznika / zdjęcia
         self.file_btn = ctk.CTkButton(
             self.input_frame,
             text="📎",
@@ -197,8 +250,6 @@ class ModernTopSep(ctk.CTk):
         )
         self.send_btn.grid(row=0, column=2)
 
-        self.add_system_message("Wprowadź adres i kliknij 'Połącz z siecią'.")
-
     def add_system_message(self, text):
         lbl = ctk.CTkLabel(
             self.messages_scroll,
@@ -206,10 +257,10 @@ class ModernTopSep(ctk.CTk):
             font=ctk.CTkFont(family="Segoe UI", size=10),
             text_color="#64748B",
         )
-        lbl.pack(pady=6)
+        lbl.pack(pady=4)
 
-    def add_message_bubble(self, content, is_me=False, is_image=False):
-        now = datetime.now().strftime("%H:%M")
+    def add_message_bubble(self, content, sender_nick, is_me=False, is_image=False, time_str=None, save=True):
+        now = time_str if time_str else datetime.now().strftime("%H:%M")
 
         bubble_row = ctk.CTkFrame(self.messages_scroll, fg_color="transparent")
         bubble_row.pack(fill="x", pady=4, padx=5)
@@ -223,21 +274,27 @@ class ModernTopSep(ctk.CTk):
         )
         bubble.pack(side=side, anchor=anchor, ipadx=6, ipady=2)
 
+        # Wyświetlanie Nicku nad wiadomością
+        nick_lbl = ctk.CTkLabel(
+            bubble,
+            text=sender_nick,
+            text_color="#93C5FD" if is_me else "#38BDF8",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+        )
+        nick_lbl.pack(anchor="w", padx=12, pady=(4, 0))
+
         if is_image:
-            # Renderowanie przesłanego podglądu zdjęcia
             try:
                 img_data = base64.b64decode(content)
                 pil_img = Image.open(io.BytesIO(img_data))
-                
-                # Reskalowanie podglądu do max 250px
                 pil_img.thumbnail((250, 250))
                 ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=pil_img.size)
 
                 img_lbl = ctk.CTkLabel(bubble, image=ctk_img, text="")
-                img_lbl.pack(anchor="w", padx=8, pady=(8, 0))
-            except Exception as e:
+                img_lbl.pack(anchor="w", padx=8, pady=(4, 0))
+            except Exception:
                 msg_lbl = ctk.CTkLabel(bubble, text="[Błąd ładowania obrazu]", text_color="#FF8888")
-                msg_lbl.pack(anchor="w", padx=12, pady=(6, 0))
+                msg_lbl.pack(anchor="w", padx=12, pady=(4, 0))
         else:
             msg_lbl = ctk.CTkLabel(
                 bubble,
@@ -247,7 +304,7 @@ class ModernTopSep(ctk.CTk):
                 wraplength=400,
                 justify="left",
             )
-            msg_lbl.pack(anchor="w", padx=12, pady=(6, 0))
+            msg_lbl.pack(anchor="w", padx=12, pady=(2, 0))
 
         time_color = "#93C5FD" if is_me else "#94A3B8"
         time_lbl = ctk.CTkLabel(
@@ -258,18 +315,70 @@ class ModernTopSep(ctk.CTk):
         )
         time_lbl.pack(anchor="e", padx=10, pady=(0, 4))
 
+        # Zapis do historii JSON
+        if save:
+            self.save_to_history({
+                "content": content,
+                "sender_nick": sender_nick,
+                "is_me": is_me,
+                "is_image": is_image,
+                "time_str": now
+            })
+
+    def save_to_history(self, msg_obj):
+        history = []
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    history = data.get("messages", [])
+            except Exception:
+                history = []
+
+        history.append(msg_obj)
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump({"my_nickname": self.nick_entry.get().strip(), "messages": history}, f, ensure_ascii=False, indent=2)
+
+    def load_chat_history(self):
+        if not os.path.exists(HISTORY_FILE):
+            self.add_system_message("Wprowadź adres i kliknij 'Połącz z siecią'.")
+            return
+
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                messages = data.get("messages", [])
+                for m in messages:
+                    self.add_message_bubble(
+                        content=m["content"],
+                        sender_nick=m["sender_nick"],
+                        is_me=m["is_me"],
+                        is_image=m["is_image"],
+                        time_str=m["time_str"],
+                        save=False
+                    )
+            self.add_system_message("Wczytano zapisana historię czatu.")
+        except Exception:
+            self.add_system_message("Nie udało się wczytać historii.")
+
+    def clear_chat_history(self):
+        if os.path.exists(HISTORY_FILE):
+            os.remove(HISTORY_FILE)
+        for widget in self.messages_scroll.winfo_children():
+            widget.destroy()
+        self.add_system_message("Wyczyszczono historię czatu.")
+
     def is_spam(self):
         current_time = time.time()
         if current_time - self.last_msg_time < self.SPAM_COOLDOWN:
-            self.add_system_message("Wysyłasz wiadomości zbyt szybko! Zwolnij.")
+            self.add_system_message("Wysyłasz wiadomości zbyt szybko!")
             return True
         self.last_msg_time = current_time
         return False
 
     def start_connection(self):
-        self.status_lbl.configure(
-            text="● Łączenie...", text_color="#FBBF24"
-        )
+        self.my_nickname = self.nick_entry.get().strip() or "Anonim"
+        self.status_lbl.configure(text="● Łączenie...", text_color="#FBBF24")
         domain = (
             self.ip_entry.get()
             .strip()
@@ -287,48 +396,49 @@ class ModernTopSep(ctk.CTk):
 
     async def connect_ws(self, url):
         try:
-            self.ws_connection = await websockets.connect(url, max_size=10_000_000) # Większy limit pakietu na fotki
+            self.ws_connection = await websockets.connect(url, max_size=10_000_000)
 
             pub_pem = self.public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo,
             ).decode("utf-8")
 
-            await self.ws_connection.send("KEY:" + pub_pem)
+            # Wysyłamy klucz i nasz nick w pakiecie inicjującym
+            handshake = json.dumps({"pem": pub_pem, "nick": self.my_nickname})
+            await self.ws_connection.send("KEY:" + handshake)
 
-            self.status_lbl.configure(
-                text="● Połączono (E2EE)", text_color="#10B981"
-            )
+            self.status_lbl.configure(text="● Połączono (E2EE)", text_color="#10B981")
             self.add_system_message("Połączono z węzłem sieci.")
 
             async for raw_msg in self.ws_connection:
                 if raw_msg.startswith("KEY:"):
-                    pem_data = raw_msg[4:].encode("utf-8")
-                    if self.peer_public_key is None:
-                        self.peer_public_key = (
-                            serialization.load_pem_public_key(pem_data)
-                        )
-                        self.add_system_message("Wymieniono klucze. Połączenie bezpieczne.")
-                        await self.ws_connection.send("KEY:" + pub_pem)
+                    try:
+                        key_info = json.loads(raw_msg[4:])
+                        pem_data = key_info["pem"].encode("utf-8")
+
+                        if self.peer_public_key is None:
+                            self.peer_public_key = serialization.load_pem_public_key(pem_data)
+                            self.peer_nickname = key_info.get("nick", "Rozmówca")
+                            self.add_system_message(f"Połączono z: {self.peer_nickname}. Szyfrowanie aktywne.")
+                            await self.ws_connection.send("KEY:" + handshake)
+                    except Exception:
+                        pass
 
                 elif raw_msg.startswith("MSG:"):
                     decrypted = self._decrypt_raw(raw_msg[4:])
                     if decrypted:
-                        self.add_message_bubble(decrypted, is_me=False, is_image=False)
+                        self.add_message_bubble(decrypted, sender_nick=self.peer_nickname, is_me=False, is_image=False)
 
                 elif raw_msg.startswith("IMG:"):
                     decrypted = self._decrypt_raw(raw_msg[4:])
                     if decrypted:
-                        self.add_message_bubble(decrypted, is_me=False, is_image=True)
+                        self.add_message_bubble(decrypted, sender_nick=self.peer_nickname, is_me=False, is_image=True)
 
         except Exception as e:
-            self.status_lbl.configure(
-                text="● Błąd połączenia", text_color="#EF4444"
-            )
+            self.status_lbl.configure(text="● Błąd połączenia", text_color="#EF4444")
             self.add_system_message(f"Błąd połączenia: {e}")
 
     def _encrypt_bytes(self, data_bytes):
-        # Dzielimy dane na bloki przy wielkich plikach / RSA OAEP max block limit
         chunk_size = 190
         encrypted_chunks = []
         for i in range(0, len(data_bytes), chunk_size):
@@ -345,6 +455,8 @@ class ModernTopSep(ctk.CTk):
         return "|".join(encrypted_chunks)
 
     def _decrypt_raw(self, raw_hex_data):
+        # Jeśli treść nie jest dla nas (obce wiadomości), odszyfrowanie wyrzuci błąd
+        # i zostanie po cichu zignorowane - nikt postronny jej nie zobaczy!
         try:
             chunks = raw_hex_data.split("|")
             decrypted_bytes = bytearray()
@@ -360,7 +472,7 @@ class ModernTopSep(ctk.CTk):
                 )
                 decrypted_bytes.extend(decrypted_chunk)
             return decrypted_bytes.decode("utf-8")
-        except Exception as e:
+        except Exception:
             return None
 
     def send_text_message(self):
@@ -380,7 +492,7 @@ class ModernTopSep(ctk.CTk):
             asyncio.run_coroutine_threadsafe(
                 self.ws_connection.send("MSG:" + hex_payload), self.loop
             )
-            self.add_message_bubble(text, is_me=True, is_image=False)
+            self.add_message_bubble(text, sender_nick=self.my_nickname, is_me=True, is_image=False)
             self.cmd_entry.delete(0, "end")
         except Exception as e:
             self.add_system_message(f"Błąd wysyłania: {e}")
@@ -409,7 +521,7 @@ class ModernTopSep(ctk.CTk):
             asyncio.run_coroutine_threadsafe(
                 self.ws_connection.send("IMG:" + hex_payload), self.loop
             )
-            self.add_message_bubble(b64_img, is_me=True, is_image=True)
+            self.add_message_bubble(b64_img, sender_nick=self.my_nickname, is_me=True, is_image=True)
         except Exception as e:
             self.add_system_message(f"Błąd wysyłania zdjęcia: {e}")
 
