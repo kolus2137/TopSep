@@ -9,31 +9,28 @@ import threading
 import customtkinter as ctk
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
-from tkinter import filedialog, simpledialog
+from tkinter import filedialog
 from PIL import Image
 import websockets
 
 ctk.set_appearance_mode("dark")
 
-HISTORY_FILE = "chat_history.json"
 
-
-class ModernTopSep(ctk.CTk):
+class TelegramStyleTopSep(ctk.CTk):
 
     def __init__(self):
         super().__init__()
 
-        self.title("Topsep — Twój prywatny komunikator")
-        self.geometry("900x680")
-        self.configure(fg_color="#0F172A")
+        self.title("Topsep — Telegram Edition")
+        self.geometry("920x680")
+        self.configure(fg_color="#0E1621")  # Ciemne tło Telegrama
 
         # Ikona
         if os.path.exists("icon.ico"):
             self.iconbitmap("icon.ico")
 
-        # Domyślny nick / Wczytanie z historii
-        self.my_nickname = "Anonim"
-        self.load_stored_nickname()
+        self.my_nickname = "Ja"
+        self.peer_nickname = "Oczekuję na rozmówcę..."
 
         # Generowanie kluczy RSA-2048
         self.private_key = rsa.generate_private_key(
@@ -41,21 +38,17 @@ class ModernTopSep(ctk.CTk):
         )
         self.public_key = self.private_key.public_key()
         self.peer_public_key = None
-        self.peer_nickname = "Rozmówca"
         self.ws_connection = None
 
         # Antyspam
         self.last_msg_time = 0
-        self.SPAM_COOLDOWN = 1.0
+        self.SPAM_COOLDOWN = 0.5  # Szybki cooldown (0.5s)
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=1)
 
         self.setup_sidebar()
         self.setup_chat_area()
-
-        # Wczytanie historii czatu do widoku
-        self.load_chat_history()
 
         # Pętla asynchroniczna w tle
         self.loop = asyncio.new_event_loop()
@@ -65,320 +58,279 @@ class ModernTopSep(ctk.CTk):
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
-    def load_stored_nickname(self):
-        if os.path.exists(HISTORY_FILE):
-            try:
-                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.my_nickname = data.get("my_nickname", "Anonim")
-            except Exception:
-                pass
-
     def setup_sidebar(self):
+        # Lewy panel w stylu Telegrama (#17212B)
         self.sidebar = ctk.CTkFrame(
-            self, width=240, corner_radius=0, fg_color="#1E293B"
+            self, width=260, corner_radius=0, fg_color="#17212B"
         )
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(8, weight=1)
+        self.sidebar.grid_rowconfigure(7, weight=1)
 
+        # Nagłówek
         self.logo_label = ctk.CTkLabel(
             self.sidebar,
             text="Topsep",
-            font=ctk.CTkFont(family="Segoe UI", size=26, weight="bold"),
-            text_color="#38BDF8",
+            font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"),
+            text_color="#64B5F6",
         )
         self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 2), sticky="w")
 
         self.sub_logo = ctk.CTkLabel(
             self.sidebar,
-            text="E2EE Messenger",
+            text="Secure E2EE Messenger",
             font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#94A3B8",
+            text_color="#7F91A4",
         )
-        self.sub_logo.grid(row=1, column=0, padx=20, pady=(0, 15), sticky="w")
+        self.sub_logo.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="w")
 
-        # Sekcja Nicku
+        # Twój Nick
         self.nick_label = ctk.CTkLabel(
             self.sidebar,
             text="TWÓJ NICK",
             font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
-            text_color="#64748B",
+            text_color="#6C7883",
         )
         self.nick_label.grid(row=2, column=0, padx=20, pady=(5, 2), sticky="w")
 
         self.nick_entry = ctk.CTkEntry(
             self.sidebar,
-            fg_color="#0F172A",
-            border_color="#334155",
+            fg_color="#0E1621",
+            border_color="#242F3D",
             border_width=1,
-            text_color="#F8FAFC",
+            text_color="#F5F5F5",
             font=ctk.CTkFont(family="Segoe UI", size=12),
-            height=34,
+            height=36,
             corner_radius=8,
         )
-        self.nick_entry.insert(0, self.my_nickname)
+        self.nick_entry.insert(0, "Anonim")
         self.nick_entry.grid(row=3, column=0, padx=20, pady=(0, 15), sticky="ew")
 
-        # Serwer
+        # Serwer / Domena
         self.ip_label = ctk.CTkLabel(
             self.sidebar,
-            text="SERWER / DOMENA",
+            text="ADRES SERWERA",
             font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
-            text_color="#64748B",
+            text_color="#6C7883",
         )
         self.ip_label.grid(row=4, column=0, padx=20, pady=(5, 2), sticky="w")
 
         self.ip_entry = ctk.CTkEntry(
             self.sidebar,
             placeholder_text="topsep.onrender.com",
-            fg_color="#0F172A",
-            border_color="#334155",
+            fg_color="#0E1621",
+            border_color="#242F3D",
             border_width=1,
-            text_color="#F8FAFC",
+            text_color="#F5F5F5",
             font=ctk.CTkFont(family="Segoe UI", size=12),
-            height=34,
+            height=36,
             corner_radius=8,
         )
         self.ip_entry.insert(0, "topsep.onrender.com")
         self.ip_entry.grid(row=5, column=0, padx=20, pady=(0, 15), sticky="ew")
 
+        # Przycisk połączenia
         self.conn_btn = ctk.CTkButton(
             self.sidebar,
-            text="Połącz z siecią",
+            text="Połącz",
             command=self.start_connection,
-            fg_color="#2563EB",
-            hover_color="#1D4ED8",
+            fg_color="#5288C1",
+            hover_color="#4676A9",
             text_color="#FFFFFF",
             font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
             height=38,
-            corner_radius=10,
+            corner_radius=8,
         )
         self.conn_btn.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
 
-        # Czyszczenie historii
-        self.clear_btn = ctk.CTkButton(
-            self.sidebar,
-            text="Wyczysć historię",
-            command=self.clear_chat_history,
-            fg_color="#334155",
-            hover_color="#475569",
-            text_color="#94A3B8",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            height=28,
-            corner_radius=8,
-        )
-        self.clear_btn.grid(row=7, column=0, padx=20, pady=(10, 0), sticky="ew")
-
+        # Status
         self.status_frame = ctk.CTkFrame(
-            self.sidebar, fg_color="#0F172A", corner_radius=12
+            self.sidebar, fg_color="#0E1621", corner_radius=10
         )
         self.status_frame.grid(
-            row=8, column=0, padx=20, pady=(20, 20), sticky="sew"
+            row=7, column=0, padx=20, pady=(20, 20), sticky="sew"
         )
 
         self.status_lbl = ctk.CTkLabel(
             self.status_frame,
-            text="● Rozłączono",
+            text="● Offline",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
-            text_color="#EF4444",
+            text_color="#E53935",
         )
         self.status_lbl.pack(padx=12, pady=10, anchor="w")
 
     def setup_chat_area(self):
         self.main_frame = ctk.CTkFrame(
-            self, corner_radius=0, fg_color="#0F172A"
+            self, corner_radius=0, fg_color="#0E1621"
         )
-        self.main_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 0))
-        self.main_frame.grid_rowconfigure(0, weight=1)
+        self.main_frame.grid(row=0, column=1, sticky="nsew")
+        self.main_frame.grid_rowconfigure(1, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
 
+        # Górny Pasek Czatu (Header Telegrama)
+        self.chat_header = ctk.CTkFrame(
+            self.main_frame, height=55, corner_radius=0, fg_color="#17212B"
+        )
+        self.chat_header.grid(row=0, column=0, sticky="ew")
+        self.chat_header.grid_columnconfigure(0, weight=1)
+
+        self.header_peer_lbl = ctk.CTkLabel(
+            self.chat_header,
+            text="Brak aktywnej rozmowy",
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color="#F5F5F5",
+        )
+        self.header_peer_lbl.grid(row=0, column=0, padx=20, pady=(8, 0), sticky="w")
+
+        self.header_status_lbl = ctk.CTkLabel(
+            self.chat_header,
+            text="Połącz się z serwerem, aby zacząć",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color="#7F91A4",
+        )
+        self.header_status_lbl.grid(row=1, column=0, padx=20, pady=(0, 8), sticky="w")
+
+        # Obszar czatu ze skrolowaniem
         self.messages_scroll = ctk.CTkScrollableFrame(
-            self.main_frame, fg_color="transparent"
+            self.main_frame, fg_color="#0E1621"
         )
         self.messages_scroll.grid(
-            row=0, column=0, padx=20, pady=(15, 10), sticky="nsew"
+            row=1, column=0, padx=10, pady=10, sticky="nsew"
         )
         self.messages_scroll.grid_columnconfigure(0, weight=1)
 
+        # Dolny pasek wpisywania wiadomości
         self.input_frame = ctk.CTkFrame(
-            self.main_frame, fg_color="transparent"
+            self.main_frame, fg_color="#17212B", height=60, corner_radius=0
         )
         self.input_frame.grid(
-            row=1, column=0, padx=20, pady=(0, 20), sticky="ew"
+            row=2, column=0, sticky="ew"
         )
         self.input_frame.grid_columnconfigure(1, weight=1)
 
+        # Przycisk załącznika (Spinacz)
         self.file_btn = ctk.CTkButton(
             self.input_frame,
             text="📎",
             command=self.send_image,
-            fg_color="#1E293B",
-            hover_color="#334155",
-            text_color="#F8FAFC",
-            font=ctk.CTkFont(size=16),
-            width=44,
-            height=44,
+            fg_color="transparent",
+            hover_color="#242F3D",
+            text_color="#7F91A4",
+            font=ctk.CTkFont(size=20),
+            width=45,
+            height=45,
             corner_radius=22,
         )
-        self.file_btn.grid(row=0, column=0, padx=(0, 8))
+        self.file_btn.grid(row=0, column=0, padx=(10, 5), pady=8)
 
+        # Pole wpisywania
         self.cmd_entry = ctk.CTkEntry(
             self.input_frame,
             placeholder_text="Napisz wiadomość...",
-            fg_color="#1E293B",
-            border_color="#334155",
-            border_width=1,
-            text_color="#FFFFFF",
+            fg_color="#0E1621",
+            border_width=0,
+            text_color="#F5F5F5",
             font=ctk.CTkFont(family="Segoe UI", size=13),
-            height=44,
-            corner_radius=22,
+            height=40,
+            corner_radius=20,
         )
-        self.cmd_entry.grid(row=0, column=1, padx=(0, 8), sticky="ew")
+        self.cmd_entry.grid(row=0, column=1, padx=5, pady=8, sticky="ew")
         self.cmd_entry.bind("<Return>", lambda e: self.send_text_message())
 
+        # Przycisk Wyślij (Samolocik / Przycisk Telegrama)
         self.send_btn = ctk.CTkButton(
             self.input_frame,
-            text="Wyślij",
+            text="➤",
             command=self.send_text_message,
-            fg_color="#3B82F6",
-            hover_color="#2563EB",
+            fg_color="#5288C1",
+            hover_color="#4676A9",
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            width=80,
-            height=44,
-            corner_radius=22,
+            font=ctk.CTkFont(size=16),
+            width=40,
+            height=40,
+            corner_radius=20,
         )
-        self.send_btn.grid(row=0, column=2)
+        self.send_btn.grid(row=0, column=2, padx=(5, 12), pady=8)
+
+        self.add_system_message("Wpisz adres serwera i kliknij Połącz.")
 
     def add_system_message(self, text):
         lbl = ctk.CTkLabel(
             self.messages_scroll,
             text=text,
             font=ctk.CTkFont(family="Segoe UI", size=10),
-            text_color="#64748B",
+            text_color="#6C7883",
         )
-        lbl.pack(pady=4)
+        lbl.pack(pady=6)
 
-    def add_message_bubble(self, content, sender_nick, is_me=False, is_image=False, time_str=None, save=True):
-        now = time_str if time_str else datetime.now().strftime("%H:%M")
+    def add_message_bubble(self, content, sender_nick, is_me=False, is_image=False):
+        now = datetime.now().strftime("%H:%M")
 
         bubble_row = ctk.CTkFrame(self.messages_scroll, fg_color="transparent")
-        bubble_row.pack(fill="x", pady=4, padx=5)
+        bubble_row.pack(fill="x", pady=3, padx=10)
 
-        bg_color = "#2563EB" if is_me else "#334155"
+        # Kolory Telegrama: #2B5278 dla "Moich", #242F3D dla "Rozmówcy"
+        bg_color = "#2B5278" if is_me else "#242F3D"
         side = "right" if is_me else "left"
         anchor = "e" if is_me else "w"
 
         bubble = ctk.CTkFrame(
-            bubble_row, fg_color=bg_color, corner_radius=16
+            bubble_row, fg_color=bg_color, corner_radius=12
         )
-        bubble.pack(side=side, anchor=anchor, ipadx=6, ipady=2)
+        bubble.pack(side=side, anchor=anchor, ipadx=4, ipady=2)
 
-        # Wyświetlanie Nicku nad wiadomością
-        nick_lbl = ctk.CTkLabel(
-            bubble,
-            text=sender_nick,
-            text_color="#93C5FD" if is_me else "#38BDF8",
-            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
-        )
-        nick_lbl.pack(anchor="w", padx=12, pady=(4, 0))
+        # Nick w bąbelku (tylko dla rozmówcy w Telegramie)
+        if not is_me:
+            nick_lbl = ctk.CTkLabel(
+                bubble,
+                text=sender_nick,
+                text_color="#64B5F6",
+                font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            )
+            nick_lbl.pack(anchor="w", padx=10, pady=(4, 0))
 
         if is_image:
             try:
                 img_data = base64.b64decode(content)
                 pil_img = Image.open(io.BytesIO(img_data))
-                pil_img.thumbnail((250, 250))
+                pil_img.thumbnail((280, 280))
                 ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=pil_img.size)
 
                 img_lbl = ctk.CTkLabel(bubble, image=ctk_img, text="")
-                img_lbl.pack(anchor="w", padx=8, pady=(4, 0))
+                img_lbl.pack(anchor="w", padx=6, pady=(6, 2))
             except Exception:
-                msg_lbl = ctk.CTkLabel(bubble, text="[Błąd ładowania obrazu]", text_color="#FF8888")
-                msg_lbl.pack(anchor="w", padx=12, pady=(4, 0))
+                msg_lbl = ctk.CTkLabel(bubble, text="[Błąd ładowania obrazu]", text_color="#E53935")
+                msg_lbl.pack(anchor="w", padx=10, pady=(4, 0))
         else:
             msg_lbl = ctk.CTkLabel(
                 bubble,
                 text=content,
-                text_color="#FFFFFF" if is_me else "#F8FAFC",
-                font=ctk.CTkFont(family="Segoe UI", size=13),
-                wraplength=400,
+                text_color="#F5F5F5",
+                font=ctk.CTkFont(family="Segoe UI", size=12),
+                wraplength=420,
                 justify="left",
             )
-            msg_lbl.pack(anchor="w", padx=12, pady=(2, 0))
+            msg_lbl.pack(anchor="w", padx=10, pady=(4, 0))
 
-        time_color = "#93C5FD" if is_me else "#94A3B8"
+        # Godzina w rogu bąbelka
+        time_color = "#8A9EA8" if is_me else "#7F91A4"
         time_lbl = ctk.CTkLabel(
             bubble,
             text=now,
             text_color=time_color,
             font=ctk.CTkFont(family="Segoe UI", size=8),
         )
-        time_lbl.pack(anchor="e", padx=10, pady=(0, 4))
-
-        # Zapis do historii JSON
-        if save:
-            self.save_to_history({
-                "content": content,
-                "sender_nick": sender_nick,
-                "is_me": is_me,
-                "is_image": is_image,
-                "time_str": now
-            })
-
-    def save_to_history(self, msg_obj):
-        history = []
-        if os.path.exists(HISTORY_FILE):
-            try:
-                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    history = data.get("messages", [])
-            except Exception:
-                history = []
-
-        history.append(msg_obj)
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump({"my_nickname": self.nick_entry.get().strip(), "messages": history}, f, ensure_ascii=False, indent=2)
-
-    def load_chat_history(self):
-        if not os.path.exists(HISTORY_FILE):
-            self.add_system_message("Wprowadź adres i kliknij 'Połącz z siecią'.")
-            return
-
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                messages = data.get("messages", [])
-                for m in messages:
-                    self.add_message_bubble(
-                        content=m["content"],
-                        sender_nick=m["sender_nick"],
-                        is_me=m["is_me"],
-                        is_image=m["is_image"],
-                        time_str=m["time_str"],
-                        save=False
-                    )
-            self.add_system_message("Wczytano zapisana historię czatu.")
-        except Exception:
-            self.add_system_message("Nie udało się wczytać historii.")
-
-    def clear_chat_history(self):
-        if os.path.exists(HISTORY_FILE):
-            os.remove(HISTORY_FILE)
-        for widget in self.messages_scroll.winfo_children():
-            widget.destroy()
-        self.add_system_message("Wyczyszczono historię czatu.")
+        time_lbl.pack(anchor="e", padx=8, pady=(0, 2))
 
     def is_spam(self):
         current_time = time.time()
         if current_time - self.last_msg_time < self.SPAM_COOLDOWN:
-            self.add_system_message("Wysyłasz wiadomości zbyt szybko!")
             return True
         self.last_msg_time = current_time
         return False
 
     def start_connection(self):
         self.my_nickname = self.nick_entry.get().strip() or "Anonim"
-        self.status_lbl.configure(text="● Łączenie...", text_color="#FBBF24")
+        self.status_lbl.configure(text="● Łączenie...", text_color="#FFA726")
         domain = (
             self.ip_entry.get()
             .strip()
@@ -403,12 +355,11 @@ class ModernTopSep(ctk.CTk):
                 format=serialization.PublicFormat.SubjectPublicKeyInfo,
             ).decode("utf-8")
 
-            # Wysyłamy klucz i nasz nick w pakiecie inicjującym
             handshake = json.dumps({"pem": pub_pem, "nick": self.my_nickname})
             await self.ws_connection.send("KEY:" + handshake)
 
-            self.status_lbl.configure(text="● Połączono (E2EE)", text_color="#10B981")
-            self.add_system_message("Połączono z węzłem sieci.")
+            self.status_lbl.configure(text="● Połączono", text_color="#66BB6A")
+            self.add_system_message("Połączono z serwerem. Oczekiwanie na drugą osobę...")
 
             async for raw_msg in self.ws_connection:
                 if raw_msg.startswith("KEY:"):
@@ -419,7 +370,12 @@ class ModernTopSep(ctk.CTk):
                         if self.peer_public_key is None:
                             self.peer_public_key = serialization.load_pem_public_key(pem_data)
                             self.peer_nickname = key_info.get("nick", "Rozmówca")
-                            self.add_system_message(f"Połączono z: {self.peer_nickname}. Szyfrowanie aktywne.")
+
+                            # Aktualizacja paska górnego
+                            self.header_peer_lbl.configure(text=self.peer_nickname)
+                            self.header_status_lbl.configure(text="online", text_color="#64B5F6")
+
+                            self.add_system_message(f"Nawiązano bezpieczne połączenie E2EE z {self.peer_nickname}.")
                             await self.ws_connection.send("KEY:" + handshake)
                     except Exception:
                         pass
@@ -435,7 +391,7 @@ class ModernTopSep(ctk.CTk):
                         self.add_message_bubble(decrypted, sender_nick=self.peer_nickname, is_me=False, is_image=True)
 
         except Exception as e:
-            self.status_lbl.configure(text="● Błąd połączenia", text_color="#EF4444")
+            self.status_lbl.configure(text="● Błąd", text_color="#E53935")
             self.add_system_message(f"Błąd połączenia: {e}")
 
     def _encrypt_bytes(self, data_bytes):
@@ -455,8 +411,6 @@ class ModernTopSep(ctk.CTk):
         return "|".join(encrypted_chunks)
 
     def _decrypt_raw(self, raw_hex_data):
-        # Jeśli treść nie jest dla nas (obce wiadomości), odszyfrowanie wyrzuci błąd
-        # i zostanie po cichu zignorowane - nikt postronny jej nie zobaczy!
         try:
             chunks = raw_hex_data.split("|")
             decrypted_bytes = bytearray()
@@ -481,7 +435,7 @@ class ModernTopSep(ctk.CTk):
             return
 
         if self.peer_public_key is None:
-            self.add_system_message("Oczekiwanie na drugiego użytkownika...")
+            self.add_system_message("Czekasz na połączenie drugiej osoby...")
             return
 
         if self.is_spam():
@@ -499,14 +453,14 @@ class ModernTopSep(ctk.CTk):
 
     def send_image(self):
         if self.peer_public_key is None:
-            self.add_system_message("Oczekiwanie na drugiego użytkownika...")
+            self.add_system_message("Czekasz na połączenie drugiej osoby...")
             return
 
         if self.is_spam():
             return
 
         file_path = filedialog.askopenfilename(
-            filetypes=[("Pliki obrazów", "*.png;*.jpg;*.jpeg;*.gif;*.bmp")]
+            filetypes=[("Obrazy", "*.png;*.jpg;*.jpeg;*.gif;*.bmp")]
         )
         if not file_path:
             return
@@ -527,5 +481,5 @@ class ModernTopSep(ctk.CTk):
 
 
 if __name__ == "__main__":
-    app = ModernTopSep()
+    app = TelegramStyleTopSep()
     app.mainloop()
