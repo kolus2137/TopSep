@@ -1,9 +1,10 @@
-import socket
-import threading
+import asyncio
 from datetime import datetime
+import threading
 import customtkinter as ctk
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+import websockets
 
 ctk.set_appearance_mode("dark")
 
@@ -17,18 +18,29 @@ class DarknetTopSep(ctk.CTk):
         self.geometry("820x540")
         self.configure(fg_color="#050505")
 
+        # Generowanie kluczy RSA-2048
         self.private_key = rsa.generate_private_key(
             public_exponent=65537, key_size=2048
         )
         self.public_key = self.private_key.public_key()
         self.peer_public_key = None
-        self.client_socket = None
+        self.ws_connection = None
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=1)
 
         self.setup_sidebar()
         self.setup_terminal_area()
+
+        # Uruchomienie pętli asyncio w osobnym wątku
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(
+            target=self._start_async_loop, daemon=True
+        ).start()
+
+    def _start_async_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
 
     def setup_sidebar(self):
         self.sidebar = ctk.CTkFrame(
@@ -55,7 +67,7 @@ class DarknetTopSep(ctk.CTk):
 
         self.ip_label = ctk.CTkLabel(
             self.sidebar,
-            text="TARGET NODE IP:",
+            text="TARGET NODE DOMAIN:",
             font=ctk.CTkFont(family="Consolas", size=10),
             text_color="#888888",
         )
@@ -63,16 +75,16 @@ class DarknetTopSep(ctk.CTk):
 
         self.ip_entry = ctk.CTkEntry(
             self.sidebar,
-            placeholder_text="127.0.0.1",
+            placeholder_text="topsep.onrender.com",
             fg_color="#111111",
             border_color="#00ff66",
             border_width=1,
             text_color="#00ff66",
-            font=ctk.CTkFont(family="Consolas", size=12),
+            font=ctk.CTkFont(family="Consolas", size=11),
             height=32,
             corner_radius=0,
         )
-        self.ip_entry.insert(0, "127.0.0.1")
+        self.ip_entry.insert(0, "topsep.onrender.com")
         self.ip_entry.grid(row=3, column=0, padx=15, pady=(0, 10), sticky="ew")
 
         self.conn_btn = ctk.CTkButton(
@@ -168,7 +180,7 @@ class DarknetTopSep(ctk.CTk):
         )
         self.send_btn.grid(row=0, column=1)
 
-        self.log_sys("SYSTEM READY. ENTER NODE IP AND CONNECT.")
+        self.log_sys("SYSTEM READY. ENTER NODE DOMAIN AND CONNECT.")
 
     def log_sys(self, text):
         now = datetime.now().strftime("%H:%M:%S")
@@ -189,49 +201,45 @@ class DarknetTopSep(ctk.CTk):
         self.status_lbl.configure(
             text="STATUS: CONNECTING...", text_color="#ffcc00"
         )
-        threading.Thread(target=self.connect, daemon=True).start()
+        domain = self.ip_entry.get().strip().replace("https://", "").replace("http://", "").strip("/")
+        
+        # Jeśli testujesz lokalnie, wpisz "127.0.0.1:10000", inaczej wss://
+        if "127.0.0.1" in domain or "localhost" in domain:
+            url = f"ws://{domain}"
+        else:
+            url = f"wss://{domain}"
 
-    def connect(self):
+        asyncio.run_coroutine_threadsafe(self.connect_ws(url), self.loop)
+
+    async def connect_ws(self, url):
         try:
-            ip = self.ip_entry.get().strip()
-            self.client_socket = socket.socket(
-                socket.AF_INET, socket.SOCK_STREAM
-            )
-            self.client_socket.connect((ip, 5555))
-
+            self.ws_connection = await websockets.connect(url)
+            
+            # Wysyłamy swój klucz publiczny po połączeniu
             pub_bytes = self.public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo,
             )
-            self.client_socket.send(pub_bytes)
+            await self.ws_connection.send(pub_bytes)
 
             self.status_lbl.configure(
                 text="STATUS: ONLINE (E2EE)", text_color="#00ff66"
             )
-            self.log_sys(f"CONNECTED TO {ip}:5555")
+            self.log_sys(f"CONNECTED TO NODE VIA WEBSOCKET.")
 
-            self.receive_loop()
-        except Exception as e:
-            self.status_lbl.configure(
-                text="STATUS: ERROR", text_color="#ff0055"
-            )
-            self.log_sys(f"CONNECTION FAILED: {e}")
-
-    def receive_loop(self):
-        while True:
-            try:
-                data = self.client_socket.recv(4096)
-                if not data:
-                    break
+            # Pętla odbierania danych
+            async for raw_data in self.ws_connection:
+                if isinstance(raw_data, str):
+                    raw_data = raw_data.encode("latin1")
 
                 if self.peer_public_key is None:
                     self.peer_public_key = (
-                        serialization.load_pem_public_key(data)
+                        serialization.load_pem_public_key(raw_data)
                     )
                     self.log_sys("PEER PUBLIC KEY EXCHANGE COMPLETE. SECURE.")
                 else:
                     decrypted = self.private_key.decrypt(
-                        data,
+                        raw_data,
                         padding.OAEP(
                             mgf=padding.MGF1(algorithm=hashes.SHA256()),
                             algorithm=hashes.SHA256(),
@@ -239,13 +247,12 @@ class DarknetTopSep(ctk.CTk):
                         ),
                     )
                     self.log_msg("PEER", decrypted.decode("utf-8"), is_me=False)
-            except:
-                break
 
-        self.status_lbl.configure(
-            text="STATUS: DISCONNECTED", text_color="#ff0055"
-        )
-        self.log_sys("CONNECTION CLOSED BY REMOTE HOST.")
+        except Exception as e:
+            self.status_lbl.configure(
+                text="STATUS: ERROR", text_color="#ff0055"
+            )
+            self.log_sys(f"CONNECTION FAILED: {e}")
 
     def send_message(self):
         text = self.cmd_entry.get().strip()
@@ -265,7 +272,11 @@ class DarknetTopSep(ctk.CTk):
                     label=None,
                 ),
             )
-            self.client_socket.send(encrypted)
+            
+            # Wysyłanie wiadomości przez WebSocket
+            asyncio.run_coroutine_threadsafe(
+                self.ws_connection.send(encrypted), self.loop
+            )
             self.log_msg("YOU", text, is_me=True)
             self.cmd_entry.delete(0, "end")
         except Exception as e:
