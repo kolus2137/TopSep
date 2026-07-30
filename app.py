@@ -4,8 +4,6 @@ import base64
 import io
 import json
 import os
-import socket
-import time
 import threading
 import customtkinter as ctk
 from cryptography.hazmat.primitives import hashes
@@ -15,9 +13,10 @@ from tkinter import filedialog
 from PIL import Image
 import websockets
 
-# Próba zaimportowania PyAudio do rozmów głosowych
+# Próba zaimportowania sounddevice + numpy do rozmów głosowych
 try:
-    import pyaudio
+    import sounddevice as sd
+    import numpy as np
     HAS_AUDIO = True
 except ImportError:
     HAS_AUDIO = False
@@ -44,12 +43,6 @@ class TelegramGroupTopSep(ctk.CTk):
 
         # Voice Chat state
         self.is_in_voice = False
-        self.audio_stream_in = None
-        self.audio_stream_out = None
-        self.udp_sock = None
-
-        self.last_msg_time = 0
-        self.SPAM_COOLDOWN = 0.4
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=1)
@@ -65,7 +58,6 @@ class TelegramGroupTopSep(ctk.CTk):
         self.loop.run_forever()
 
     def _derive_key(self, passphrase: str) -> bytes:
-        # Generowanie stałego klucza AES-256 z nazwy/hasła pokoju
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
@@ -90,7 +82,7 @@ class TelegramGroupTopSep(ctk.CTk):
         )
         self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 2), sticky="w")
 
-        # Twój Nick
+        # Nickname
         self.nick_label = ctk.CTkLabel(
             self.sidebar,
             text="TWÓJ NICK",
@@ -110,7 +102,7 @@ class TelegramGroupTopSep(ctk.CTk):
         self.nick_entry.insert(0, "Anonim")
         self.nick_entry.grid(row=2, column=0, padx=20, pady=(0, 10), sticky="ew")
 
-        # Nazwa Grupy / Pokoju
+        # Nazwa Grupy
         self.room_label = ctk.CTkLabel(
             self.sidebar,
             text="NAZWA POKOJU / HASŁO GRUPY",
@@ -131,7 +123,7 @@ class TelegramGroupTopSep(ctk.CTk):
         self.room_entry.insert(0, "KukiMafia")
         self.room_entry.grid(row=4, column=0, padx=20, pady=(0, 10), sticky="ew")
 
-        # Serwer
+        # Adres Serwera
         self.ip_entry = ctk.CTkEntry(
             self.sidebar,
             placeholder_text="topsep.onrender.com",
@@ -144,7 +136,7 @@ class TelegramGroupTopSep(ctk.CTk):
         self.ip_entry.insert(0, "topsep.onrender.com")
         self.ip_entry.grid(row=5, column=0, padx=20, pady=(0, 15), sticky="ew")
 
-        # Przycisk połączenia
+        # Przycisk Dołączania
         self.conn_btn = ctk.CTkButton(
             self.sidebar,
             text="Dołącz do pokoju",
@@ -158,7 +150,7 @@ class TelegramGroupTopSep(ctk.CTk):
         )
         self.conn_btn.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
 
-        # KANAŁ GŁOSOWY
+        # Przycisk Głosu
         self.voice_btn = ctk.CTkButton(
             self.sidebar,
             text="🎤 Dołącz do rozmowy",
@@ -172,7 +164,7 @@ class TelegramGroupTopSep(ctk.CTk):
         )
         self.voice_btn.grid(row=7, column=0, padx=20, pady=(15, 5), sticky="ew")
 
-        # Status
+        # Panel Statusu
         self.status_frame = ctk.CTkFrame(
             self.sidebar, fg_color="#0E1621", corner_radius=10
         )
@@ -219,7 +211,7 @@ class TelegramGroupTopSep(ctk.CTk):
         )
         self.header_status_lbl.grid(row=1, column=0, padx=20, pady=(0, 8), sticky="w")
 
-        # Scroll wiadomości
+        # Scroll czatu
         self.messages_scroll = ctk.CTkScrollableFrame(
             self.main_frame, fg_color="#0E1621"
         )
@@ -228,7 +220,7 @@ class TelegramGroupTopSep(ctk.CTk):
         )
         self.messages_scroll.grid_columnconfigure(0, weight=1)
 
-        # Input
+        # Dolny pasek wprowadzania
         self.input_frame = ctk.CTkFrame(
             self.main_frame, fg_color="#17212B", height=60, corner_radius=0
         )
@@ -353,7 +345,7 @@ class TelegramGroupTopSep(ctk.CTk):
             decrypted = aesgcm.decrypt(nonce, ciphertext, None)
             return decrypted.decode("utf-8")
         except Exception:
-            return None  # Wiadomość z innego pokoju / niepoprawne hasło
+            return None
 
     def start_connection(self):
         self.my_nickname = self.nick_entry.get().strip() or "Anonim"
@@ -432,10 +424,10 @@ class TelegramGroupTopSep(ctk.CTk):
         )
         self.add_message_bubble(b64_img, sender_nick=self.my_nickname, is_me=True, is_image=True)
 
-    # --- KANAŁ GŁOSOWY ---
+    # --- KANAŁ GŁOSOWY (SOUNDDEVICE) ---
     def toggle_voice_chat(self):
         if not HAS_AUDIO:
-            self.add_system_message("Zainstaluj PyAudio (pip install pyaudio), aby używać rozmów!")
+            self.add_system_message("Zainstaluj sounddevice i numpy (pip install sounddevice numpy)!")
             return
 
         if not self.is_in_voice:
@@ -446,33 +438,24 @@ class TelegramGroupTopSep(ctk.CTk):
         else:
             self.is_in_voice = False
             self.voice_btn.configure(text="🎤 Dołącz do rozmowy", fg_color="#2B5278")
-            self.add_system_message("Opuszczono kanał głosowy.")
+            self.add_system_message("Opusztczono kanał głosowy.")
 
     def _start_audio(self):
-        p = pyaudio.PyAudio()
-        CHUNK = 1024
-        FORMAT = pyaudio.paInt16
-        CHANNELS = 1
-        RATE = 20000
+        samplerate = 20000
+        channels = 1
+
+        def audio_callback(indata, outdata, frames, time_info, status):
+            if self.is_in_voice:
+                outdata[:] = indata
+            else:
+                raise sd.CallbackStop()
 
         try:
-            self.audio_stream_in = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
-            self.audio_stream_out = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
-
-            while self.is_in_voice:
-                data = self.audio_stream_in.read(CHUNK, exception_on_overflow=False)
-                # Dźwięk jest natychmiast odtwarzany na wyjściu (pętla odsłuchowa / streaming)
-                self.audio_stream_out.write(data)
-        except Exception:
-            pass
-        finally:
-            if self.audio_stream_in:
-                self.audio_stream_in.stop_stream()
-                self.audio_stream_in.close()
-            if self.audio_stream_out:
-                self.audio_stream_out.stop_stream()
-                self.audio_stream_out.close()
-            p.terminate()
+            with sd.Stream(samplerate=samplerate, channels=channels, callback=audio_callback):
+                while self.is_in_voice:
+                    sd.sleep(100)
+        except Exception as e:
+            self.add_system_message(f"Błąd audio: {e}")
 
 
 if __name__ == "__main__":
