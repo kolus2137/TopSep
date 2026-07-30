@@ -11,8 +11,8 @@ import websockets
 
 ctk.set_appearance_mode("dark")
 
-SERVER_URL = "http://127.0.0.1:8000"
-WS_URL = "ws://127.0.0.1:8000"
+SERVER_URL = "https://topsep.onrender.com"
+WS_URL = "wss://topsep.onrender.com"
 
 class TelegramApp(ctk.CTk):
     def __init__(self):
